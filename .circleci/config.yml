@@ -1,0 +1,31 @@
+version: 2
+jobs:
+
+  build-dev-image:
+    docker:
+      - image: circleci/node:12.13.0
+
+    working_directory: ~/angular
+
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: true
+
+      - checkout
+
+      - run:
+          name: Create dev docker image and push to Docker Hub
+          command: |
+            VERSION=$(node -p -e "require('./package.json').version")
+            docker build -f docker/dev/Dockerfile -t ianjamieson/deploying-angular-to-digitalocean-with-circleci:dev-${VERSION}
+            docker push ianjamieson/deploying-angular-to-digitalocean-with-circleci:dev-${VERSION}
+
+workflows:
+  version: 2
+  main:
+    jobs:
+      - build-dev-image:
+          filters:
+            branches:
+              only:
+              - develop
