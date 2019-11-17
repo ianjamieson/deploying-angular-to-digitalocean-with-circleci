@@ -9,16 +9,17 @@ jobs:
 
     steps:
       - setup_remote_docker:
-          docker_layer_caching: true
+#          docker_layer_caching: true
 
       - checkout
 
       - run:
           name: Create dev docker image and push to Docker Hub
           command: |
+            echo $DOCKER_PASSWORD | docker login -u $DOCKER_USER --password-stdin
             VERSION=$(node -p -e "require('./package.json').version")
-            docker build -f docker/dev/Dockerfile -t ianjamieson/deploying-angular-to-digitalocean-with-circleci:dev-${VERSION}
-            docker push ianjamieson/deploying-angular-to-digitalocean-with-circleci:dev-${VERSION}
+            docker build -f docker/dev/Dockerfile -t ianjamieson/deploying-angular-to-digitalocean-with-circleci:dev-${VERSION}-${CIRCLE_BUILD_NUM} .
+            docker push ianjamieson/deploying-angular-to-digitalocean-with-circleci:dev-${VERSION}-${CIRCLE_BUILD_NUM}
 
 workflows:
   version: 2
