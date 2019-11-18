@@ -1,4 +1,5 @@
 export const environment = {
   production: true,
-  environmentName: 'staging'
+  environmentName: 'staging',
+  version: require('../../package.json').version
 };
