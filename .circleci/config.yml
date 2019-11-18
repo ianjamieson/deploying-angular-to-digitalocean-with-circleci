@@ -1,24 +1,80 @@
 version: 2.1
 commands:
-  build-image:
+  deploy-docker-image-to-digitialocean:
+    description: 'Deploys an image to Digital Ocean'
+    parameters:
+      env:
+        type: string
+        default: 'staging'
+      floating_ip:
+        type: string
+    steps:
+      - run:
+          name: Install Docker Machine
+          command: |
+            base=https://github.com/docker/machine/releases/download/v0.16.0 &&
+            curl -L $base/docker-machine-$(uname -s)-$(uname -m) >/tmp/docker-machine &&
+            sudo mv /tmp/docker-machine /usr/local/bin/docker-machine &&
+            chmod +x /usr/local/bin/docker-machine
+
+      - run:
+          name: Create the Digital Ocean Droplet
+          command: |
+            VERSION=$(node -p -e "require('./package.json').version")
+            docker-machine create --digitalocean-size "s-1vcpu-1gb" --digitalocean-region "lon1" --driver digitalocean --digitalocean-access-token ${DIGITAL_OCEAN_ACCESS_TOKEN} deploying-angular-to-digitalocean-with-circleci-<< parameters.env >>-${VERSION}
+
+      - run:
+          name: Configure Docker to run as droplet
+          command: |
+            VERSION=$(node -p -e "require('./package.json').version")
+            eval $(docker-machine env deploying-angular-to-digitalocean-with-circleci-<< parameters.env >>-${VERSION} --shell /bin/bash)
+
+
+      - run:
+          name: Start Docker Image on Droplet
+          command: |
+            VERSION=$(node -p -e "require('./package.json').version")
+            docker run -d -p 80:80 ianjamieson/deploying-angular-to-digitalocean-with-circleci:<< parameters.env >>-latest
+
+      - run:
+          name: Assign Floating IP to the new Droplet and remove old droplet
+          command: |
+            DROPLETS=$(docker run --rm --interactive --tty --env=DIGITALOCEAN_ACCESS_TOKEN=${DIGITAL_OCEAN_ACCESS_TOKEN} digitalocean/doctl compute droplet list --format "Name, ID" 'deploying-angular-to-digitalocean-with-circleci-<< parameters.env >>*')
+            NUMBER_OF_DROPLETS=$(echo $DROPLETS | wc -l)
+            NEW_DROPLET_ID=''
+            OLD_DROPLET_ID=''
+            if [ $NUMBER_OF_DROPLETS = 1 ]; then NEW_DROPLET_ID=$(echo "${DROPLETS}" | sed -n 2p | grep -oP "[0-9]{9}"); fi
+            if [ $NUMBER_OF_DROPLETS = 2 ]; then NEW_DROPLET_ID=$(echo "${DROPLETS}" | sed -n 3p | grep -oP "[0-9]{9}") && OLD_DROPLET_ID=$(echo "${DROPLETS}" | sed -n 2p | grep -oP "[0-9]{9}"); fi
+            docker run --rm --interactive --tty --env=DIGITALOCEAN_ACCESS_TOKEN=${DIGITAL_OCEAN_ACCESS_TOKEN} digitalocean/doctl compute floating-ip-action assign << parameters.floating_ip >> ${NEW_DROPLET_ID}
+            ./node_modules/wait-on/bin/wait-on http://<< parameters.floating_ip >> && docker run --rm --interactive --tty --env=DIGITALOCEAN_ACCESS_TOKEN=${DIGITAL_OCEAN_ACCESS_TOKEN} digitalocean/doctl compute droplet delete -f ${OLD_DROPLET_ID}
+
+  build-angular-app:
+    description: 'Builds the Angular app'
+    parameters:
+      env:
+        type: string
+        default: 'staging'
+    steps:
+      - run:
+          name: 'Build the Angular app'
+          command: ./node_modules/@angular/cli/bin/ng build --configuration=<< parameters.env >>
+
+  build-docker-image:
     description: 'Builds and pushes a docker image'
     parameters:
       env:
         type: string
         default: 'dev'
     steps:
-      - setup_remote_docker
-#          docker_layer_caching: true
-
-      - checkout
-
       - run:
           name: Create docker image and push to Docker Hub
           command: |
             echo $DOCKER_PASSWORD | docker login -u $DOCKER_USER --password-stdin
             VERSION=$(node -p -e "require('./package.json').version")
             docker build -f docker/<< parameters.env >>/Dockerfile -t ianjamieson/deploying-angular-to-digitalocean-with-circleci:<< parameters.env >>-${VERSION}-${CIRCLE_BUILD_NUM} .
+            docker tag ianjamieson/deploying-angular-to-digitalocean-with-circleci:<< parameters.env >>-${VERSION}-${CIRCLE_BUILD_NUM} ianjamieson/deploying-angular-to-digitalocean-with-circleci:<< parameters.env >>-latest
             docker push ianjamieson/deploying-angular-to-digitalocean-with-circleci:<< parameters.env >>-${VERSION}-${CIRCLE_BUILD_NUM}
+            docker push ianjamieson/deploying-angular-to-digitalocean-with-circleci:<< parameters.env >>-latest
 
 jobs:
 
@@ -29,7 +85,12 @@ jobs:
     working_directory: ~/angular
 
     steps:
-      - build-image:
+      - setup_remote_docker
+#          docker_layer_caching: true # If your paid plan allows for it
+
+      - checkout
+
+      - build-docker-image:
           env: dev
 
   build-staging-image:
@@ -39,7 +100,27 @@ jobs:
     working_directory: ~/angular
 
     steps:
-      - build-image:
+      - setup_remote_docker
+#          docker_layer_caching: true # If your paid plan allows for it
+
+      - checkout
+
+      - restore_cache:
+          keys:
+            - npm-cache-v1-{{ checksum "package-lock.json" }}-{{ arch }}
+
+      - run: npm ci
+
+      - save_cache:
+          key: npm-cache-v1-{{ checksum "package-lock.json" }}-{{ arch }}
+          paths:
+            - ~/.npm
+            - ~/.cache
+
+      - build-angular-app:
+          env: staging
+
+      - build-docker-image:
           env: staging
 
   build-production-image:
@@ -49,11 +130,85 @@ jobs:
     working_directory: ~/angular
 
     steps:
-      - build-image:
+      - setup_remote_docker
+#          docker_layer_caching: true # If your paid plan allows for it
+
+      - checkout
+
+      - restore_cache:
+          keys:
+          - npm-cache-v1-{{ checksum "package-lock.json" }}-{{ arch }}
+
+      - run: npm ci
+
+      - save_cache:
+          key: npm-cache-v1-{{ checksum "package-lock.json" }}-{{ arch }}
+          paths:
+            - ~/.npm
+            - ~/.cache
+
+      - build-angular-app:
           env: production
 
+      - build-docker-image:
+          env: production
+
+  deploy-staging-image:
+    docker:
+      - image: circleci/node:12.13.0
+
+    working_directory: ~/angular
+
+    steps:
+      - setup_remote_docker
+
+      - checkout
+
+      - restore_cache:
+          keys:
+          - npm-cache-v1-{{ checksum "package-lock.json" }}-{{ arch }}
+
+      - run: npm ci
+
+      - save_cache:
+          key: npm-cache-v1-{{ checksum "package-lock.json" }}-{{ arch }}
+          paths:
+            - ~/.npm
+            - ~/.cache
+
+      - deploy-docker-image-to-digitialocean:
+          env: staging
+          floating_ip: ${DIGITAL_OCEAN_FLOATING_IP_STAGING}
+
+  deploy-production-image:
+    docker:
+      - image: circleci/node:12.13.0
+
+    working_directory: ~/angular
+
+    steps:
+      - setup_remote_docker
+
+      - checkout
+
+      - restore_cache:
+          keys:
+          - npm-cache-v1-{{ checksum "package-lock.json" }}-{{ arch }}
+
+      - run: npm ci
+
+      - save_cache:
+          key: npm-cache-v1-{{ checksum "package-lock.json" }}-{{ arch }}
+          paths:
+            - ~/.npm
+            - ~/.cache
+
+      - deploy-docker-image-to-digitialocean:
+          env: production
+          floating_ip: ${DIGITAL_OCEAN_FLOATING_IP_PRODUCTION}
+
 workflows:
-  version: 2
+  version: 2.1
   main:
     jobs:
     - build-dev-image:
@@ -68,8 +223,16 @@ workflows:
             only:
             - /release-.*/
 
+    - deploy-staging-image:
+        requires:
+          - build-staging-image
+
     - build-production-image:
         filters:
           branches:
             only:
             - /master/
+
+    - deploy-production-image:
+        requires:
+          - build-production-image
