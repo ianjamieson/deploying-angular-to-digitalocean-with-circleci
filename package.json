@@ -1,6 +1,6 @@
 {
   "name": "deploying-angular-to-digitalocean-with-circleci",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "scripts": {
     "ng": "ng",
     "start": "ng serve",
