@@ -1,16 +1,24 @@
 version: 2.1
 commands:
+  # Set up a job template to deploy to digital ocean
   deploy-docker-image-to-digitialocean:
+    # With a description
     description: 'Deploys an image to Digital Ocean'
+    # When we uset his job later on, we can use the following parameters
     parameters:
+      # This will be either production or staging, most of the steps for prod and staging
+      # are identical. So using this job template with params reduces duplication
       env:
         type: string
         default: 'staging'
+      # Staging and prod have different floating IP's, define them with this param
       floating_ip:
         type: string
+    # These are the steps, in order that CircleCI will execute.
     steps:
       - run:
           name: Install Docker Machine
+          # Standard one liner to install Docker Machine
           command: |
             base=https://github.com/docker/machine/releases/download/v0.16.0 &&
             curl -L $base/docker-machine-$(uname -s)-$(uname -m) >/tmp/docker-machine &&
@@ -19,12 +27,17 @@ commands:
 
       - run:
           name: Create the Digital Ocean Droplet
+          # Get the version from the package.json file, this would be kept up to date
+          # using npm version
+          # Then use the docker-machine command to create a new droplet on Digital Ocean,
+          # as we have done before
           command: |
             VERSION=$(node -p -e "require('./package.json').version")
             docker-machine create --digitalocean-size "s-1vcpu-1gb" --digitalocean-region "lon1" --driver digitalocean --digitalocean-access-token ${DIGITAL_OCEAN_ACCESS_TOKEN} deploying-angular-to-digitalocean-with-circleci-<< parameters.env >>-${VERSION}
 
       - run:
           name: Configure Docker to run as droplet
+          # Configure docker-machine to connect to the remote droplet
           command: |
             VERSION=$(node -p -e "require('./package.json').version")
             eval $(docker-machine env deploying-angular-to-digitalocean-with-circleci-<< parameters.env >>-${VERSION} --shell /bin/bash)
@@ -32,12 +45,23 @@ commands:
 
       - run:
           name: Start Docker Image on Droplet
+          # Start your container on the remote droplet
           command: |
             VERSION=$(node -p -e "require('./package.json').version")
             docker run -d -p 80:80 ianjamieson/deploying-angular-to-digitalocean-with-circleci:<< parameters.env >>-latest
 
       - run:
           name: Assign Floating IP to the new Droplet and remove old droplet
+          # This step is a little complicated and can probably be a little simpler. The docker run
+          # commands are run in the context of digitalocean/doctl image. I am using this method
+          # instead of downloading and installing doctl, it was quicker this way with docker.
+          # 1. We get the current running droplets name and IDs, store this in $DROPLETS
+          # 2. Count how many droplets there are, there should normally be 2, the original
+          # droplet running and the new one we just created
+          # 3. Pull the Droplet ID's for the new and old droplets for use later
+          # 4. Assign the floating IP to the new Droplet ID
+          # 5. Wait for the IP to return 200 status code
+          # 6. Delete the old droplet
           command: |
             DROPLETS=$(docker run --rm --interactive --tty --env=DIGITALOCEAN_ACCESS_TOKEN=${DIGITAL_OCEAN_ACCESS_TOKEN} digitalocean/doctl compute droplet list --format "Name, ID" 'deploying-angular-to-digitalocean-with-circleci-<< parameters.env >>*')
             NUMBER_OF_DROPLETS=$(echo $DROPLETS | wc -l)
@@ -48,26 +72,36 @@ commands:
             docker run --rm --interactive --tty --env=DIGITALOCEAN_ACCESS_TOKEN=${DIGITAL_OCEAN_ACCESS_TOKEN} digitalocean/doctl compute floating-ip-action assign << parameters.floating_ip >> ${NEW_DROPLET_ID}
             ./node_modules/wait-on/bin/wait-on http://<< parameters.floating_ip >> && docker run --rm --interactive --tty --env=DIGITALOCEAN_ACCESS_TOKEN=${DIGITAL_OCEAN_ACCESS_TOKEN} digitalocean/doctl compute droplet delete -f ${OLD_DROPLET_ID}
 
+  # Job template to build the angular app
   build-angular-app:
     description: 'Builds the Angular app'
     parameters:
+      # Should be either production or staging
       env:
         type: string
         default: 'staging'
     steps:
       - run:
           name: 'Build the Angular app'
+          # Call the ng command (this will need to be installed by the job that uses this template.
           command: ./node_modules/@angular/cli/bin/ng build --configuration=<< parameters.env >>
 
+  # Job template to build a docker image
   build-docker-image:
     description: 'Builds and pushes a docker image'
     parameters:
+      # Can be dev, staging or production
       env:
         type: string
         default: 'dev'
     steps:
       - run:
           name: Create docker image and push to Docker Hub
+          # 1. Login to docker
+          # 2. Get the version from the package.json file
+          # 3. Build a docker image using the Dockerfile specified in teh matching env directory
+          # 4. Tag the image with latest
+          # 5. Push both images to Docker Hub
           command: |
             echo $DOCKER_PASSWORD | docker login -u $DOCKER_USER --password-stdin
             VERSION=$(node -p -e "require('./package.json').version")
@@ -76,24 +110,31 @@ commands:
             docker push ianjamieson/deploying-angular-to-digitalocean-with-circleci:<< parameters.env >>-${VERSION}-${CIRCLE_BUILD_NUM}
             docker push ianjamieson/deploying-angular-to-digitalocean-with-circleci:<< parameters.env >>-latest
 
+# Here are where the actual jobs are defined, above here is just job templates
 jobs:
 
   build-dev-image:
+    # Use the Circle CI node convenience image
     docker:
       - image: circleci/node:12.13.0
 
+    # Set the working directory, this will be created and cd'd into
     working_directory: ~/angular
 
     steps:
+      # Ensure we have docker commands available (they are used in build-docker-image)
       - setup_remote_docker
 #          docker_layer_caching: true # If your paid plan allows for it
 
+      # Check out the repo
       - checkout
 
+      # Call the template with the correct environment
       - build-docker-image:
           env: dev
 
   build-staging-image:
+    # Use the Circle CI node convenience image
     docker:
       - image: circleci/node:12.13.0
 
@@ -105,24 +146,31 @@ jobs:
 
       - checkout
 
+      # If npm ci has been cached, then restore it
       - restore_cache:
           keys:
             - npm-cache-v1-{{ checksum "package-lock.json" }}-{{ arch }}
 
+      # Install node_modules, (similar to npm install)
       - run: npm ci
 
+      # Save the npm ci cache
       - save_cache:
           key: npm-cache-v1-{{ checksum "package-lock.json" }}-{{ arch }}
           paths:
             - ~/.npm
             - ~/.cache
 
+      # Build the angular app, this uses ng build, which is why we need to install
+      # the npm modules above.
       - build-angular-app:
           env: staging
 
+      # Build the docker image
       - build-docker-image:
           env: staging
 
+  # Production is the same as staging, but with different env vars
   build-production-image:
     docker:
       - image: circleci/node:12.13.0
@@ -154,6 +202,7 @@ jobs:
           env: production
 
   deploy-staging-image:
+    # Use the Circle CI node convenience image
     docker:
       - image: circleci/node:12.13.0
 
@@ -176,10 +225,12 @@ jobs:
             - ~/.npm
             - ~/.cache
 
+      # Call the deploy job, ensuring we have the correct floating IP (defined in env vars)
       - deploy-docker-image-to-digitialocean:
           env: staging
           floating_ip: ${DIGITAL_OCEAN_FLOATING_IP_STAGING}
 
+  # Production is the same as staging
   deploy-production-image:
     docker:
       - image: circleci/node:12.13.0
@@ -207,32 +258,38 @@ jobs:
           env: production
           floating_ip: ${DIGITAL_OCEAN_FLOATING_IP_PRODUCTION}
 
+# Workflows allow us to link job runs
 workflows:
   version: 2.1
   main:
     jobs:
+    # build-dev-image only runs on develop branch
     - build-dev-image:
         filters:
           branches:
             only:
             - develop
 
+    # build-staging-image only runs on release branches, eg. release-1.0.1100
     - build-staging-image:
         filters:
           branches:
             only:
             - /release-.*/
 
+    # deploy-staging-image only runs AFTER build-staging-image
     - deploy-staging-image:
         requires:
           - build-staging-image
 
+    # build-production-image only runs on master branch
     - build-production-image:
         filters:
           branches:
             only:
             - /master/
 
+    # deploy-production-image runs AFTER build-production-image
     - deploy-production-image:
         requires:
           - build-production-image
